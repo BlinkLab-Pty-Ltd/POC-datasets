@@ -1,0 +1,276 @@
+---
+title: "R Notebook - BlinkLab Prepulse inhibition - HJB"
+output: html_notebook
+---
+
+```{r Load packages}
+library(plyr)
+library(ggplot2)
+library(GLMMadaptive)
+library(lme4)
+library(emmeans)
+library(nlme)
+```
+
+```{r Define functions}
+# summarizing function
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  library(plyr)
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- ddply(data, groupvars, .drop=.drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm=TRUE),
+                     mean = mean   (xx[[col]], na.rm=TRUE),
+                     sd   = sd     (xx[[col]], na.rm=TRUE),
+                     median = median (xx[[col]], na.rm=TRUE),
+                     q25 = quantile(xx[[col]], 0.25, na.rm=TRUE),
+                     q75 = quantile(xx[[col]], 0.75, na.rm=TRUE)
+                   )
+                 },
+                 measurevar
+  )
+  
+  # Rename the "mean" column    
+  #datac <- rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  datac$cilo <- datac$mean - 1.96 * datac$se
+  datac$cihi <- datac$mean + 1.96 * datac$se
+  
+  return(datac)
+}
+```
+
+```{r Load CSV file}
+# set wd - working directory
+rm(wd)
+# wd <- setwd("/Volumes/GoogleDrive-113757142669259810127/.shortcut-targets-by-id/1lR0JRy4JZ-OaC12pI6Qx5lc3MMcEKXXG/1. Science/1. PoC study - Caroline/1. analysis/PPI")
+wd <- setwd("/Volumes/...")
+print(wd)
+
+df <- df_PPI
+```
+
+```{r Rename and create new variables}
+# rename variables
+ebcAll <- df
+ebcAll$X <- NULL
+
+ebcAll$trial_type <- ebcAll$trial_category
+
+ebcAll$startle_perc <- NULL
+ebcAll$startle_perc <- ebcAll$startle_present * 100
+ebcAll$groups  <- as.character("Neurotypical")
+ebcAll$trial_type [ebcAll$trial_type == "pulse"] <- "prepulse 00 + pulse"
+```
+
+"subject_id"            "trial_id"              "result_id"            
+ [5] "trial_category"        "PPR_amps_mpt"         
+[13] "startle_amps_mpt"      "PPR_perc"             
+[17] "startle_perc"                   
+[25] "signal_time"           "signal_amplitude" 
+
+
+```{r Create Aggregated dataframe}
+# by trialtype
+ebcAggr <- ebcAll %>% group_by (groups, subject_id, trial_id, trial_type) %>% summarise_at (c("PPR_amps_mpt", "PPR_perc"  ,"startle_amps_mpt", "startle_perc"), funs( 
+  mean (., na.rm=T)
+))
+ebcAggr$subject_id2 <- as.factor(ebcAggr$subject_id)
+
+ebcAggr2 <- ebcAll %>% group_by (groups, subject_id, trial_type) %>% summarise_at (c("PPR_amps_mpt", "PPR_perc"  ,"startle_amps_mpt", "startle_perc"), funs( 
+  mean (., na.rm=T)
+))
+ebcAggr2$subject_id2 <- as.factor(ebcAggr2$subject_id)
+
+```
+
+```{r Create trace map on CS only trials}
+ebcAll1 <- ebcAll
+ebcTrace <- ebcAll1 %>% group_by (groups, trial_type, subject_id, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+
+ebcTrace1 <- ebcAll1 %>% group_by (groups, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+
+plot1 <- ggplot(data = ebcTrace, aes(x=signal_time, y=signal_amplitude, group = subject_id)) +
+    geom_line(color = "gray", size = 0.5) +
+    geom_line(data = ebcTrace1, aes( x=signal_time, y=signal_amplitude, group = groups), size = 1.5, color = "black") +
+    # scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 120, linetype = "longdash", size = 1) +
+    theme_bw() + 
+    facet_grid(groups ~ trial_type) +
+    theme(legend.position="none")
+plot1
+
+ggsave (file="PPI_trace_PLOT.svg", plot=plot1, width=10, height=8)
+```
+
+```{r Startle percentage per trialtype}
+STperc <- summarySE(ebcAggr2, "startle_perc", c("groups", "trial_type"))
+write.csv(STperc, file = "STpercentage_TABLE.csv")
+
+plot1 <- ggplot(STperc, aes(x=trial_type, y=mean, group = groups)) +
+   geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.2, size = 1, 
+                position=position_dodge(0.05)) +
+  geom_line(data = ebcAggr2, aes(x=trial_type, y=startle_perc, group = subject_id2), color = "gray", size = 0.5) +
+  theme_classic() +
+  geom_line () + 
+  geom_point() + 
+  ylab("Startle percentage ") + 
+  ylim(0,100)
+plot1
+
+ggsave (file="STperc_PLOT.svg", plot=plot1, width=10, height=8)
+
+
+#### ** Models ####
+lme1 <-  lme (startle_perc ~ trial_type,
+              data = ebcAggr, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ trial_type), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "STperc_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("STperc_", outLME, file = (paste0 (wd, "/", "STperc_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+```
+
+```{r Startle amps mpt per trialtype}
+ST_amps_mpt <- summarySE(ebcAggr2, "startle_amps_mpt", c("groups", "trial_type"))
+write.csv(ST_amps_mpt, file = "startle_amps_mpt_TABLE.csv")
+
+plot1 <- ggplot(ST_amps_mpt, aes(x=trial_type, y=mean, group = groups)) +
+   geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.2, size = 1, 
+                position=position_dodge(0.05)) +
+  geom_line(data = ebcAggr2, aes(x=trial_type, y=startle_amps_mpt, group = subject_id2), color = "gray", size = 0.5) +
+  theme_classic() +
+  geom_line () + 
+  geom_point() + 
+  ylab("Startle amplidute mpt ") + 
+  ylim(-0.1,1)
+plot1
+
+ggsave (file="ST_amps_mpt_PLOT.svg", plot=plot1, width=10, height=8)
+
+
+#### ** Models ####
+lme1 <-  lme (startle_amps_mpt ~ trial_type,
+              data = ebcAggr, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ trial_type), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "ST_amp_mpt_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("ST_amps_mpt_", outLME, file = (paste0 (wd, "/", "ST_amps_mpt_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+```
+
+```{r PPR percentage per trialtype}
+PPR_perc <- summarySE(ebcAggr2, "PPR_perc", c("groups", "trial_type"))
+write.csv(PPR_perc, file = "STpercentage_TABLE.csv")
+
+plot1 <- ggplot(PPR_perc, aes(x=trial_type, y=mean, group = groups)) +
+   geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.2, size = 1, 
+                position=position_dodge(0.05)) +
+  geom_line(data = ebcAggr2, aes(x=trial_type, y=PPR_perc, group = subject_id2), color = "gray", size = 0.5) +
+  theme_classic() +
+  geom_line () + 
+  geom_point() + 
+  ylab("Startle percentage ") + 
+  ylim(0,100)
+plot1
+
+ggsave (file="PPRperc_PLOT.svg", plot=plot1, width=10, height=8)
+
+
+#### ** Models ####
+lme1 <-  lme (PPR_perc ~ trial_type,
+              data = ebcAggr, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ trial_type), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "PPRperc_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("PPRperc_", outLME, file = (paste0 (wd, "/", "PPRperc_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+```
+
+```{r Startle amps mpt per trialtype}
+PPR_amps_mpt <- summarySE(ebcAggr2, "PPR_amps_mpt", c("groups", "trial_type"))
+write.csv(PPR_amps_mpt, file = "PPR_amps_mpt_TABLE.csv")
+
+plot1 <- ggplot(PPR_amps_mpt, aes(x=trial_type, y=mean, group = groups)) +
+   geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.2, size = 1, 
+                position=position_dodge(0.05)) +
+  geom_line(data = ebcAggr2, aes(x=trial_type, y=PPR_amps_mpt, group = subject_id2), color = "gray", size = 0.5) +
+  theme_classic() +
+  geom_line () + 
+  geom_point() + 
+  ylab("Startle amplidute mpt ") + 
+  ylim(-0.1,1)
+plot1
+
+ggsave (file="PPR_amps_mpt_PLOT.svg", plot=plot1, width=10, height=8)
+
+
+#### ** Models ####
+lme1 <-  lme (PPR_amps_mpt ~ trial_type,
+              data = ebcAggr, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ trial_type), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "PPR_amp_mpt_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("PPR_amps_mpt_", outLME, file = (paste0 (wd, "/", "PPR_amps_mpt_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+```

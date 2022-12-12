@@ -1,0 +1,709 @@
+---
+title: "R Notebook - BlinkLab Eyeblink Conditioning"
+author: "Henk-Jan Boele" 
+remarks: "This code is for analyzing eyeblink conditioning data collected the BlinkLab smartphone application"
+output: html_notebook
+
+---
+
+```{r Load packages}
+library(plyr)
+library(ggplot2)
+library(GLMMadaptive)
+library(lme4)
+library(emmeans)
+library(nlme)
+```
+
+```{r Define functions}
+# summarizing function
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  library(plyr)
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- ddply(data, groupvars, .drop=.drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm=TRUE),
+                     mean = mean   (xx[[col]], na.rm=TRUE),
+                     sd   = sd     (xx[[col]], na.rm=TRUE),
+                     median = median (xx[[col]], na.rm=TRUE),
+                     q25 = quantile(xx[[col]], 0.25, na.rm=TRUE),
+                     q75 = quantile(xx[[col]], 0.75, na.rm=TRUE)
+                   )
+                 },
+                 measurevar
+  )
+
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  datac$cilo <- datac$mean - 1.96 * datac$se
+  datac$cihi <- datac$mean + 1.96 * datac$se
+  
+  return(datac)
+}
+
+
+```
+
+```{r Load CSV file}
+# set wd - working directory
+rm(wd)
+wd <- setwd("/Volumes/....")
+print(wd)
+
+# read csv file, select data, convert to dataframe, recode data
+csvfile <- "df_EBC.csv"
+ebcAll<- read.csv(csvfile)
+nrow(ebcAll)
+```
+
+
+```{r SUBSET DATAFRAME!!}
+ebcAll <- subset(ebcAll, (session_nr <= 6)) # Acquisition Phase session 1-6
+# ebcAll <- subset(ebcAll, (session_nr == 6 | session_nr == 7)) # short CS session 7
+# ebcAll <- subset(ebcAll, (session_nr == 6 | session_nr == 8 | session_nr == 9)) # ISI switch session 8 and 9
+unique(ebcAll$subject_id)
+length(unique(ebcAll$subject_id))
+```
+
+```{r Create Aggregated dataframes}
+# by trialtype
+ebcAggr <- ebcAll %>% group_by (groups, subject_id, session_nr, trial_type) %>% summarise_at (c("CRperc", "ISIhpamp","CRpeakamp", "CRpeaktime", "CRonset", "URperc", "URpeaktime","URpeakamp", "final_perc"), funs( 
+  mean (., na.rm=T)
+))
+ebcAggr$subject_id2 <- as.factor(ebcAggr$subject_id)
+ebcAggr$session_nr2 <- as.factor(ebcAggr$session_nr)
+
+# CSonly and Paired merged
+ebcAll_subset <- subset (ebcAll, trial_type != "us-only")
+
+ebcAggr1 <- ebcAll %>% group_by (groups, subject_id, session_nr) %>% summarise_at (c("CRperc", "ISIhpamp","CRpeakamp", "CRpeaktime", "CRonset", "URperc", "URpeaktime","URpeakamp"), funs( 
+  mean (., na.rm=T)
+))
+
+ebcAggr1$subject_id2 <- as.factor(ebcAggr1$subject_id)
+ebcAggr1$session_nr2 <- as.factor(ebcAggr1$session_nr)
+
+# CSonly and Paired merged, trial level
+ebcAggr1a <- ebcAll %>% group_by (groups, subject_id, session_nr, trial_nr) %>% summarise_at (c("CRperc", "ISIhpamp","CRpeakamp", "CRpeaktime", "CRonset", "URperc", "URpeaktime","URpeakamp"), funs( 
+  mean (., na.rm=T)
+))
+
+ebcAggr1a$subject_id2 <- as.factor(ebcAggr1a$subject_id)
+ebcAggr1a$session_nr2 <- as.factor(ebcAggr1a$session_nr)
+
+# CSonly
+ebcAll_subset <- subset (ebcAll, trial_type == "cs-only")
+
+ebcAggr2 <- ebcAll_subset %>% group_by (groups, subject_id, session_nr) %>% summarise_at (c("CRperc", "ISIhpamp","CRpeakamp", "CRpeaktime", "CRonset", "URperc", "URpeaktime","URpeakamp"), funs( 
+  mean (., na.rm=T)
+))
+
+ebcAggr2$subject_id2 <- as.factor(ebcAggr2$subject_id)
+ebcAggr2$session_nr2 <- as.factor(ebcAggr2$session_nr)
+
+
+ebcAggr2a <- ebcAll_subset %>% group_by (groups, subject_id, session_nr, trial_nr) %>% summarise_at (c("CRperc", "ISIhpamp","CRpeakamp", "CRpeaktime", "CRonset", "URperc", "URpeaktime","URpeakamp"), funs( 
+  mean (., na.rm=T)
+))
+
+ebcAggr2a$subject_id2 <- as.factor(ebcAggr2a$subject_id)
+ebcAggr2a$session_nr2 <- as.factor(ebcAggr2a$session_nr)
+```
+
+```{r Create heatmap on CS only trials}
+jet.colors <- colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+
+# by group
+ebcAll1 <- ebcAll
+ebcHeat <- ebcAll1 %>% group_by (groups, session_nr, trial_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcHeat)
+
+ebcHeat_csonly <- subset(ebcHeat, trial_type == "cs-only")
+ebcHeat_csonly$trial_index1 <- as.character(paste0(ebcHeat_csonly$session_nr, ebcHeat_csonly$trial_nr))
+ebcHeat_csonly$trial_index2 <- as.integer(factor(ebcHeat_csonly$trial_index1))
+
+plot1 <- ggplot(ebcHeat_csonly, aes(x=signal_time, y=trial_index2, fill=signal_amplitude)) +
+    geom_tile() + 
+    scale_fill_gradientn(colours=jet.colors(9), limits= c(-0.2, 0.7)) +
+    scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 450, linetype = "longdash", size = 1) +
+    facet_grid(.~groups) +
+    theme_classic()
+plot1
+
+# merge groups
+ebcAll1 <- ebcAll
+ebcHeat <- ebcAll1 %>% group_by (session_nr, trial_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcHeat)
+
+ebcHeat_csonly <- subset(ebcHeat, trial_type == "cs-only")
+ebcHeat_csonly$trial_index1 <- as.character(paste0(ebcHeat_csonly$session_nr, ebcHeat_csonly$trial_nr))
+ebcHeat_csonly$trial_index2 <- as.integer(factor(ebcHeat_csonly$trial_index1))
+
+plot2 <- ggplot(ebcHeat_csonly, aes(x=signal_time, y=trial_index2, fill=signal_amplitude)) +
+    geom_tile() + 
+    scale_fill_gradientn(colours=jet.colors(9), limits= c(-0.2, 0.7)) +
+    scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 450, linetype = "longdash", size = 1) +
+    theme_classic()
+plot2
+
+heat_csonly <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+heat_csonly
+
+ggsave (file="heat_csonly_PLOT.svg", plot=heat_csonly, width=10, height=8)
+
+```
+
+```{r Create trace map on CS only trials}
+ebcAll1 <- ebcAll
+ebcTrace <- ebcAll1 %>% group_by (groups, session_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcTrace)
+
+ebcTrace_csonly <- subset(ebcTrace, trial_type == "cs-only")
+
+plot1 <- ggplot(ebcTrace_csonly, aes(x=signal_time, y=signal_amplitude, group = session_nr)) +
+    geom_tile() + 
+    geom_line(aes(color = session_nr), size = 1) +
+    scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 450, linetype = "longdash", size = 1) +
+    theme_bw() + 
+    facet_grid(.~groups) +
+    theme(legend.position="none")
+plot1
+
+ebcTrace <- ebcAll1 %>% group_by (session_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcTrace)
+
+ebcTrace_csonly <- subset(ebcTrace, trial_type == "cs-only")
+
+plot2 <- ggplot(ebcTrace_csonly, aes(x=signal_time, y=signal_amplitude, group = session_nr)) +
+    geom_tile() + 
+    geom_line(aes(color = session_nr), size = 1) +
+    scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 450, linetype = "longdash", size = 1) +
+    theme_bw() + 
+    theme(legend.position="none")
+plot2
+
+trace_csonly <- ggarrange(plot1, plot2, ncol = 1, nrow = 2)
+trace_csonly
+
+ggsave (file="trace_csonly_PLOT.svg", plot=trace_csonly, width=10, height=8)
+```
+
+```{r Create heatmap on CS-US trials}
+jet.colors <- colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+
+ebcAll1 <- ebcAll
+ebcHeat <- ebcAll1 %>% group_by (groups, session_nr, trial_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcHeat)
+
+ebcHeat_paired <- subset(ebcHeat, trial_type == "paired")
+ebcHeat_paired$trial_index1 <- as.character(paste0(ebcHeat_paired$session_nr, ebcHeat_paired$trial_nr))
+ebcHeat_paired$trial_index2 <- as.integer(factor(ebcHeat_paired$trial_index1))
+unique(ebcAll$subject_id2)
+
+plot1 <- ggplot(ebcHeat_paired, aes(x=signal_time, y=trial_index2, fill=signal_amplitude)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours=jet.colors(9), limits= c(-0.1, 0.8)) +
+  geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+  geom_vline(xintercept = 450, linetype = "longdash", size = 1) + 
+  scale_x_continuous(limits = c(-100,750)) +
+  theme_classic() +
+  facet_grid(.~groups)
+plot1
+
+
+ebcAll1 <- ebcAll
+ebcHeat <- ebcAll1 %>% group_by (session_nr, trial_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcHeat)
+
+ebcHeat_paired <- subset(ebcHeat, trial_type == "paired")
+ebcHeat_paired$trial_index1 <- as.character(paste0(ebcHeat_paired$session_nr, ebcHeat_paired$trial_nr))
+ebcHeat_paired$trial_index2 <- as.integer(factor(ebcHeat_paired$trial_index1))
+unique(ebcAll$subject_id2)
+
+plot2 <- ggplot(ebcHeat_paired, aes(x=signal_time, y=trial_index2, fill=signal_amplitude)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours=jet.colors(9), limits= c(-0.1, 0.8)) +
+  geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+  geom_vline(xintercept = 450, linetype = "longdash", size = 1) + 
+  scale_x_continuous(limits = c(-100,750)) +
+  theme_classic() +
+  facet_grid(.~trial_type)
+plot2
+
+heat_paired <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+heat_paired
+ggsave (file="heat_paired_PLOT.svg", plot=heat_paired, width=10, height=8)
+
+```
+
+```{r Create trace map on CS-US only trials}
+ebcAll1 <- ebcAll
+ebcTrace <- ebcAll1 %>% group_by (groups, session_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcTrace)
+
+ebcTrace_paired <- subset(ebcTrace, trial_type == "paired" & session_nr > 0)
+
+plot1 <- ggplot(ebcTrace_paired, aes(x=signal_time, y=signal_amplitude, group = session_nr)) +
+    geom_tile() + 
+    geom_line(aes(color = session_nr), size = 1) +
+    scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 450, linetype = "longdash", size = 1) +
+    theme_classic() + 
+    facet_grid(.~ groups) + 
+    ylab("Normalized eyelid closure") + 
+    xlab("Time after CS onset") + 
+    theme(legend.position="none")
+plot1
+
+
+ebcAll1 <- ebcAll
+ebcTrace <- ebcAll1 %>% group_by (session_nr, trial_type, signal_time) %>% summarise_at (c("signal_amplitude"), funs( 
+  mean (., na.rm=T)
+))
+nrow(ebcTrace)
+
+ebcTrace_paired <- subset(ebcTrace, trial_type == "paired" & session_nr > 0)
+
+plot2 <- ggplot(ebcTrace_paired, aes(x=signal_time, y=signal_amplitude, group = session_nr)) +
+    geom_tile() + 
+    geom_line(aes(color = session_nr), size = 1) +
+    scale_x_continuous(limits = c(-400,1500)) +
+    geom_vline(xintercept = 0, linetype = "longdash", size = 1) + 
+    geom_vline(xintercept = 450, linetype = "longdash", size = 1) +
+    theme_classic() + 
+    ylab("Normalized eyelid closure") + 
+    xlab("Time after CS onset") + 
+    theme(legend.position="none")
+plot2
+
+trace_paired <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+trace_paired
+
+ggsave (file="trace_paired_PLOT.svg", plot=trace_paired, width=10, height=8)
+```
+
+```{r CR percentage per trialtype}
+CRperc <- summarySE(ebcAggr, "CRperc", c("groups", "session_nr", "trial_type"))
+write.csv(CRperc, file = "CRpercentage_bytrial_TABLE.csv")
+
+plot1 <- ggplot(data = ebcAggr, aes(x=session_nr, y=CRperc)) +
+  theme_classic() +
+  geom_line(aes(color = subject_id2)) +
+  ylab("CR percentage") + 
+  ylim(0,100) +
+  facet_grid(groups ~ trial_type) +
+  theme(legend.position="none")
+
+plot2 <- ggplot(CRperc, aes(x=session_nr, y=mean)) +
+  theme_classic() +
+  geom_line () + 
+  geom_point() + 
+  geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.4, 
+                position=position_dodge(0.05)) +
+  ylab("CR percentage ") + 
+  ylim(0,100) +
+  facet_grid(groups ~ trial_type)
+
+plot <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+plot
+
+ggsave (file="CRperc_bytrial_PLOT.svg", plot=plot, width=10, height=8)
+
+
+#### ** Models ####
+if (length(unique(ebcAggr1$groups)) == 1) {
+lme1 <-  lme (CRperc ~ session_nr2,
+              data = ebcAggr1a, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+if (length(unique(ebcAggr1$groups)) > 1) {
+  lme1 <-  lme (CRperc ~ session_nr2 * groups,
+              data = ebcAggr1a, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "CRperc_bytrial_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("CRperc_bytrial", outLME, file = (paste0 (wd, "/", "CRperc_bytrial_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+```
+
+```{r CR percentage merged}
+CRperc <- summarySE(ebcAggr1, "CRperc", c("groups", "session_nr"))
+write.csv(CRperc, file = "CRpercentage_merged_TABLE.csv")
+
+plot1 <- ggplot(data = ebcAggr1, aes(x=session_nr, y=CRperc)) +
+  theme_classic() +
+  geom_line(aes(color = subject_id2)) +
+  ylab("CR percentage") + 
+  ylim(0,100) +
+  theme(legend.position="none") +
+  facet_grid(.~groups)
+
+plot2 <- ggplot(CRperc, aes(x=session_nr, y=mean)) +
+  theme_classic() +
+  geom_line () + 
+  geom_point() + 
+  geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.4, 
+                position=position_dodge(0.05)) +
+  ylab("CR percentage ") + 
+  ylim(0,100) +
+  facet_grid(.~groups)
+
+plot <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+plot
+
+ggsave (file="CRperc_merged_PLOT.svg", plot=plot, width=10, height=8)
+ 
+  #### ** Models #### 
+if (length(unique(ebcAggr1$groups)) == 1) {
+lme1 <-  lme (CRperc ~ session_nr2,
+              data = ebcAggr1a, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+if (length(unique(ebcAggr1$groups)) > 1) {
+  lme1 <-  lme (CRperc ~ session_nr2 * groups,
+              data = ebcAggr1a, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "CRperc_merged_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("CRperc_merged", outLME, file = (paste0 (wd, "/", "CRperc_merged_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+```
+
+
+```{r Normalized eyelid closure per trialtype}
+ISIamp <- summarySE(ebcAggr, "ISIhpamp", c("groups", "session_nr", "trial_type"))
+write.csv(ISIamp, file = "ISIamp_bytrial_TABLE.csv")
+
+### ** Figures ####
+plot1 <- ggplot(data = ebcAggr, aes(x=session_nr, y=ISIhpamp)) +
+  theme_classic() +
+  geom_line(aes(color = subject_id2)) +
+  ylab("Norm eyelid closure") + 
+  ylim(-0.1,1) +
+  facet_grid(groups ~ trial_type) +
+  theme(legend.position="none")
+
+plot2 <- ggplot(ISIamp, aes(x=session_nr, y=mean)) +
+  theme_classic() +
+  geom_line() + 
+  geom_point() + 
+  ylab(" ") + 
+  geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.4, 
+                position=position_dodge(0.05)) +
+  ylab("Norm eyelid closure") + 
+  ylim(-0.1,1) +
+  facet_grid(groups ~ trial_type)
+
+plot <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+plot
+
+ggsave (file="ISIhp_bytrial_PLOT.svg", plot=plot, width=10, height=8)
+  
+
+#### ** Models ####
+if (length(unique(ebcAggr1$groups)) == 1) {
+lme1 <-  lme (ISIhpamp ~ session_nr2,
+              data = ebcAggr1a, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+if (length(unique(ebcAggr1$groups)) > 1) {
+  lme1 <-  lme (ISIhpamp ~ session_nr2 * groups,
+              data = ebcAggr1a, #dataset with CSonly and Paired trials
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "ISIamp_bytrial_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("ISIhpamp_bytrial", outLME, file = (paste0 (wd, "/", "ISIhpamp_bytrial_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+# plot(lme1, resid(., type = "p") ~ fitted(.),
+#      type = c("p", "smooth"), lwd = 3)
+# qqnorm(lme1, ~ resid(., type = "p"), ylim=c(-4:3), xlim=c(-4:3), abline = c(0,1))
+
+
+```
+
+```{r Normalized eyelid closure merged}
+ISIamp <- summarySE(ebcAggr1, "ISIhpamp", c("groups", "session_nr"))
+write.csv(ISIamp, file = "ISIamp_merged_TABLE.csv")
+
+### ** Figures ####
+plot1 <- ggplot(data = ebcAggr1, aes(x=session_nr, y=ISIhpamp, group = subject_id2)) +
+  theme_classic() +
+  geom_line(aes(color = subject_id2)) +
+  ylab("Norm eyelid closure") + 
+  ylim(-0.1,1) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+plot2 <- ggplot(ISIamp, aes(x=session_nr, y=mean)) +
+  theme_classic() +
+  geom_line() + 
+  geom_point() + 
+  ylab(" ") + 
+  geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.4, 
+                position=position_dodge(0.05)) +
+  ylab("Norm eyelid closure") + 
+  ylim(-0.1,1) +
+  facet_grid (.~ groups)
+
+plot <- ggarrange(plot1, plot2, nrow = 2, ncol = 1)
+plot
+
+ggsave (file="ISIhpamp_merged_PLOT.svg", plot=plot, width=10, height=8)
+  
+#### ** Models ####
+if (length(unique(ebcAggr1$groups)) == 1) {
+lme1 <-  lme (ISIhpamp ~ session_nr2,
+              data = ebcAggr1a,
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+
+if (length(unique(ebcAggr1$groups)) > 1) {
+ lme1 <-  lme (ISIhpamp ~ groups*session_nr2,
+              data = ebcAggr1a,
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude) 
+}
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "ISIamp_merged_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("ISIhpamp_merged", outLME, file = (paste0 (wd, "/", "ISIhpamp_merged_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+# plot(lme1, resid(., type = "p") ~ fitted(.),
+#      type = c("p", "smooth"), lwd = 3)
+# qqnorm(lme1, ~ resid(., type = "p"), ylim=c(-4:3), xlim=c(-4:3), abline = c(0,1))
+
+
+```
+
+```{r CR onset merged}
+CRonset <- summarySE(ebcAggr, "CRonset", c("groups", "session_nr"))
+write.csv(CRonset, file = "CRonset_merged_TABLE.csv")
+
+### ** Figures ####
+plot1 <- ggplot(data = ebcAggr1, aes(x=session_nr, y=CRonset)) +
+  theme_classic() +
+  geom_line(aes(color = subject_id2)) +
+  ylab("CR onset") + 
+  ylim(0,1000) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+plot2 <- ggplot(CRonset, aes(x=session_nr, y=mean)) +
+  theme_classic() +
+  geom_line() + 
+  geom_point() + 
+  ylab("CR onset") + 
+  geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.4, 
+                position=position_dodge(0.05)) +
+  ylab("CR onset") + 
+  ylim(0,1000) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+plot3 <- ggplot(ebcAll, aes(x = CRonset)) +
+  theme_classic() +
+  ylab("CR onset") + 
+  geom_histogram ((aes(y = (..count..)/tapply(..count..,..PANEL..,sum)[..PANEL..]*100)), binwidth=(25)) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+plot <- ggarrange(plot1, plot2, plot3, nrow = 3, ncol = 1)
+plot
+
+ggsave (file="CRonset_merged_PLOT.svg", plot=plot, width=10, height=8)
+  
+#### ** Models ####
+if (length(unique(ebcAggr1$groups)) == 1) {
+lme1 <-  lme (CRonset ~ session_nr2,
+              data = ebcAggr1a,
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+if (length(unique(ebcAggr1$groups)) > 1) {
+ lme1 <-  lme (CRonset ~ groups*session_nr2,
+              data = ebcAggr1a,
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude) 
+}
+
+summary (lme1)
+anova  (lme1)
+VarCorr  (lme1)
+
+emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "CRonset_merged_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("CRonset_merged", outLME, file = (paste0 (wd, "/", "CRonset_merged_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+```
+
+```{r CR peaktime CS only}
+CRpeaktime <- summarySE(ebcAggr2, "CRpeaktime", c("groups", "session_nr"))
+write.csv(CRpeaktime, file = "CRpeaktime_CSonly_TABLE.csv")
+
+### ** Figures ####
+plot1 <- ggplot(data = ebcAggr2, aes(x=session_nr, y=CRpeaktime)) +
+  theme_classic() +
+  geom_line(aes(color = subject_id2)) +
+  ylab("CR peaktime") + 
+  ylim(0,1000) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+plot2 <- ggplot(CRpeaktime, aes(x=session_nr, y=mean)) +
+  theme_classic() +
+  geom_line() + 
+  geom_point() + 
+  ylab("CR onset") + 
+  geom_errorbar(aes(ymin=cilo, ymax=cihi), width=.4, 
+                position=position_dodge(0.05)) +
+  ylab("CR peaktime") + 
+  ylim(0,1000) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+ebcCSonly <- subset(ebcAll, trial_type == 'cs-only')
+
+plot3 <- ggplot(ebcCSonly, aes(x = CRpeaktime)) +
+  theme_classic() +
+  ylab("CR peaktime") + 
+  geom_histogram ((aes(y = (..count..)/tapply(..count..,..PANEL..,sum)[..PANEL..]*100)), binwidth=(25)) +
+  facet_grid(.~ trial_type) +
+  theme(legend.position="none") +
+  facet_grid (.~ groups)
+
+plot <- ggarrange(plot1, plot2, plot3, nrow = 3, ncol = 1)
+plot
+
+ggsave (file="CRpeaktime_CSonly_PLOT.svg", plot=plot, width=10, height=8)
+  
+
+#### ** Models ####
+if (length(unique(ebcAggr1$groups)) == 1) {
+lme1 <-  lme (CRpeaktime ~ session_nr2,
+              data = ebcAggr2a,
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+
+if (length(unique(ebcAggr1$groups)) > 1) {
+lme1 <-  lme (CRpeaktime ~ groups*session_nr2,
+              data = ebcAggr2a,
+              correlation = NULL,
+              random = ~ 1 | subject_id,
+              method = "REML",
+              na.action=na.exclude)
+}
+
+sum <- summary (lme1)
+an <- anova (lme1)
+vc <- VarCorr  (lme1)
+em <- emmeans (lme1, list (pairwise ~ session_nr2), adjust = "holm") # posthoc test: group per session effect with p value
+
+write.csv(an, file = "CRpeaktime_CSonly_ANOVA.csv")
+
+outLME <- capture.output(sum, an, vc, em)
+cat ("CRpeaktime_CSonly", outLME, file = (paste0 (wd, "/", "CRpeaktime_CSonly_SUMMARY", ".txt")), sep = "\n", append = FALSE)
+
+```
